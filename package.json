@@ -1,6 +1,7 @@
 {
-  "name": "messenger-task-manager",
+  "name": "messenger-task-panel",
   "version": "1.0.0",
+  "description": "Automated Messenger Task Manager using messagix-js and Express",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,5 +10,8 @@
     "express": "^4.19.2",
     "messagix-js": "latest",
     "pino-pretty": "^11.0.0"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
