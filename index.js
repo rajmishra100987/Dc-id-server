@@ -1,234 +1,249 @@
-const express = require('express');
-const { MessengerClient, Platform, CookieManager } = require('messagix-js');
-const crypto = require('crypto');
+import express from "express";
+import http from "http";
+import fs from "fs";
+import { FBClient } from "fb-messenger-e2ee";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const server = http.createServer(app);
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Active tasks ko track karne ke liye memory store
-const activeTasks = new Map();
+// State Variables
+let isRunning = false;
+let currentClient = null;
+let stopRequested = false;
 
-// HTML UI Dashboard with E2EE Options
-app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <title>Messenger Task Manager Panel (E2EE Supported)</title>
-            <style>
-                body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }
-                .container { max-width: 700px; margin: auto; background: #1e293b; padding: 20px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
-                input, textarea { width: 100%; padding: 10px; margin: 8px 0; background: #0f172a; border: 1px solid #334155; color: #fff; border-radius: 4px; box-sizing: border-box; }
-                .checkbox-group { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
-                .checkbox-group input { width: auto; }
-                button { background: #3b82f6; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
-                button.stop { background: #ef4444; margin-left: 10px; }
-                button:hover { opacity: 0.9; }
-                .console { background: #000; padding: 15px; border-radius: 4px; height: 250px; overflow-y: auto; font-family: monospace; color: #4ade80; margin-top: 15px; font-size: 13px; }
-                .task-box { margin-top: 20px; border-top: 1px solid #334155; padding-top: 15px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h2>⚡ Messenger Automated Task Panel (E2EE)</h2>
-                <form id="taskForm">
-                    <label>Messenger Cookies (sb, datr, c_user, xs):</label>
-                    <textarea name="cookies" rows="3" placeholder="c_user=...; xs=...;" required></textarea>
-                    
-                    <label>Group / Thread ID:</label>
-                    <input type="text" name="threadId" placeholder="Enter Target Group ID" required>
-                    
-                    <label>Haters Name (Prefix):</label>
-                    <input type="text" name="hatersName" placeholder="Enter Haters Name">
-                    
-                    <label>Messages List (Ek line me ek message):</label>
-                    <textarea name="messages" rows="4" placeholder="Hello&#10;Kaise ho&#10;Test message" required></textarea>
-                    
-                    <div class="checkbox-group">
-                        <input type="checkbox" id="enableE2EE" name="enableE2EE" value="true">
-                        <label for="enableE2EE" style="margin:0; cursor:pointer;">Enable End-to-End Encryption (E2EE)</label>
-                    </div>
+// Delay Helper Function
+const sleep = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 
-                    <label>E2EE PIN (Agar E2EE Enable kiya hai):</label>
-                    <input type="password" name="e2eePin" placeholder="Enter your E2EE PIN if required">
+// Cookie String to AppState JSON Converter Helper
+function convertCookieStringtoAppState(cookieStr) {
+  const cookies = cookieStr.split(';');
+  const appState = [];
 
-                    <label>Time Delay (Seconds):</label>
-                    <input type="number" name="delay" value="5" min="2" required>
-                    
-                    <button type="submit">Start Task</button>
-                </form>
+  for (let cookie of cookies) {
+    const parts = cookie.trim().split('=');
+    if (parts.length >= 2) {
+      const key = parts[0].trim();
+      const value = parts.slice(1).join('=').trim();
+      appState.push({
+        key: key,
+        value: value,
+        domain: ".facebook.com",
+        path: "/",
+        hostOnly: false,
+        secure: true,
+        httpOnly: true
+      });
+    }
+  }
+  return appState;
+}
 
-                <div class="task-box">
-                    <h3>Task Control & Live Logs</h3>
-                    <input type="text" id="activeTaskId" placeholder="Task ID yahan show hogi..." readonly>
-                    <button type="button" class="stop" onclick="stopTask()">Stop / Delete Task</button>
-                    <div class="console" id="consoleLogs">Waiting for task execution...</div>
-                </div>
-            </div>
-
-            <script>
-                let logInterval;
-
-                document.getElementById('taskForm').addEventListener('submit', async (e) => {
-                    e.preventDefault();
-                    const formData = new FormData(e.target);
-                    const data = Object.fromEntries(formData.entries());
-                    
-                    // Convert checkbox value to boolean/string properly
-                    data.enableE2EE = document.getElementById('enableE2EE').checked;
-
-                    const res = await fetch('/start-task', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(data)
-                    });
-                    const result = await res.json();
-                    
-                    if(result.success) {
-                        document.getElementById('activeTaskId').value = result.taskId;
-                        startLogPolling(result.taskId);
-                    } else {
-                        alert('Error: ' + result.error);
-                    }
-                });
-
-                function startLogPolling(taskId) {
-                    if (logInterval) clearInterval(logInterval);
-                    logInterval = setInterval(async () => {
-                        const res = await fetch('/logs/' + taskId);
-                        const data = await res.json();
-                        if(data.logs) {
-                            const consoleDiv = document.getElementById('consoleLogs');
-                            consoleDiv.innerHTML = data.logs.join('<br>');
-                            consoleDiv.scrollTop = consoleDiv.scrollHeight;
-                        }
-                    }, 1000);
-                }
-
-                async function stopTask() {
-                    const taskId = document.getElementById('activeTaskId').value;
-                    if(!taskId) return alert('Koi active task nahi hai!');
-                    
-                    const res = await fetch('/stop-task/' + taskId, { method: 'POST' });
-                    const result = await res.json();
-                    alert(result.message);
-                    if(logInterval) clearInterval(logInterval);
-                }
-            </script>
-        </body>
-        </html>
-    `);
-});
-
-// Task Start Endpoint
-app.post('/start-task', async (req, res) => {
-    const { cookies, threadId, hatersName, messages, delay, enableE2EE, e2eePin } = req.body;
-    const taskId = crypto.randomBytes(4).toString('hex');
-    
-    const messageList = messages.split('\n').map(m => m.trim()).filter(Boolean);
-    const logs = [`[${new Date().toLocaleTimeString()}] Task ${taskId} initialized...`];
-    
-    activeTasks.set(taskId, { logs, status: 'running', interval: null });
-
-    res.json({ success: true, taskId });
-
-    // Background Execution Loop with E2EE params
-    executeMessengerTask(taskId, cookies, threadId, hatersName || '', messageList, parseInt(delay) || 5, enableE2EE, e2eePin);
-});
-
-// Background Task Function with E2EE Support
-async function executeMessengerTask(taskId, cookieStr, threadId, hatersName, messages, delaySec, enableE2EE, e2eePin) {
-    const task = activeTasks.get(taskId);
-    if (!task) return;
-
-    try {
-        task.logs.push(`[${new Date().toLocaleTimeString()}] Parsing cookies & authenticating (E2EE: ${enableE2EE})...`);
-        const cookieManager = CookieManager.fromString(Platform.Messenger, cookieStr);
+// Web Dashboard Main Route
+app.get("/", (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FB E2EE Group & DM Auto Messenger</title>
+    <style>
+        body { font-family: sans-serif; background-color: #121212; color: #fff; padding: 20px; margin: 0; }
+        .container { max-width: 600px; margin: 0 auto; background: #1e1e1e; padding: 20px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        h2 { text-align: center; color: #0084ff; }
+        label { font-weight: bold; margin-top: 15px; display: block; color: #aaa; }
+        input, textarea { width: 100%; padding: 10px; margin-top: 5px; border-radius: 5px; border: 1px solid #333; background: #2a2a2a; color: #fff; box-sizing: border-box; }
+        textarea { height: 100px; }
+        .btn-group { display: flex; gap: 10px; margin-top: 20px; }
+        button { flex: 1; padding: 12px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 16px; }
+        .btn-start { background: #0084ff; color: white; }
+        .btn-stop { background: #d32f2f; color: white; }
+        #logBox { margin-top: 20px; background: #000; padding: 10px; height: 150px; overflow-y: scroll; border-radius: 5px; font-family: monospace; font-size: 12px; border: 1px solid #333; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>FB Messenger E2EE Bot (Cookies String Supported)</h2>
         
-        const clientOptions = {
-            platform: Platform.Messenger,
-            cookies: cookieManager.getAll(),
-            enableE2EE: enableE2EE === true || enableE2EE === 'true'
-        };
+        <form id="botForm">
+            <label>Messenger Cookies String Paste Box (c_user=...; xs=...):</label>
+            <textarea id="appState" placeholder="Paste c_user=...; xs=... cookies here..." required></textarea>
 
-        if (clientOptions.enableE2EE && e2eePin) {
-            clientOptions.e2eePin = e2eePin;
+            <label>Target ID (DM ID ya Group Thread ID):</label>
+            <input type="text" id="threadId" placeholder="e.g. 850260014837003" required>
+
+            <label>Message Prefix (Optional):</label>
+            <input type="text" id="prefix" placeholder="e.g. [DevilX] ">
+
+            <label>Messages List (Har Line Par 1 Message):</label>
+            <textarea id="messages" required>TESTING E2EE MESSAGE</textarea>
+
+            <label>Delay (Seconds):</label>
+            <input type="number" id="delay" value="30" min="5" required>
+
+            <div class="btn-group">
+                <button type="button" class="btn-start" onclick="startMessaging()">START MESSAGING</button>
+                <button type="button" class="btn-stop" onclick="stopMessaging()">STOP</button>
+            </div>
+        </form>
+
+        <label>Status Logs:</label>
+        <div id="logBox">System Ready... Waiting for input.</div>
+    </div>
+
+    <script>
+        function log(msg) {
+            const logBox = document.getElementById('logBox');
+            logBox.innerHTML += '<div>[' + new Date().toLocaleTimeString() + '] ' + msg + '</div>';
+            logBox.scrollTop = logBox.scrollHeight;
         }
 
-        const client = new MessengerClient(clientOptions);
+        async function startMessaging() {
+            const appState = document.getElementById('appState').value.trim();
+            const threadId = document.getElementById('threadId').value.trim();
+            const prefix = document.getElementById('prefix').value;
+            const messages = document.getElementById('messages').value.trim().split('\\n').filter(m => m.length > 0);
+            const delay = parseInt(document.getElementById('delay').value);
 
-        task.logs.push(`[${new Date().toLocaleTimeString()}] Connecting to messenger.com...`);
-        await client.loadMessagesPage();
-        await client.connect();
-
-        task.logs.push(`[${new Date().toLocaleTimeString()}] ✓ Messenger Cookie authenticated successfully!`);
-
-        let msgIndex = 0;
-        let loopCount = 1;
-
-        const intervalId = setInterval(async () => {
-            if (!activeTasks.has(taskId) || task.status === 'stopped') {
-                clearInterval(intervalId);
+            if (!appState || !threadId || messages.length === 0) {
+                alert('Kripya Cookies, Target ID aur Messages fill karein!');
                 return;
             }
 
-            if (messages.length === 0) return;
+            log("Starting request sent to Render Server...");
+            const response = await fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ appState, threadId, prefix, messages, delay })
+            });
+            const data = await response.json();
+            log(data.message);
+        }
 
-            const rawMsg = messages[msgIndex];
-            const finalMessage = hatersName ? `${hatersName} ${rawMsg}` : rawMsg;
-
-            try {
-                await client.sendMessage(threadId, finalMessage);
-                task.logs.push(`[${new Date().toLocaleTimeString()}] ✓ Sent Loop:${loopCount} Msg[${msgIndex+1}]: ${finalMessage}`);
-            } catch (err) {
-                task.logs.push(`[${new Date().toLocaleTimeString()}] ❌ Send Error: ${err.message}`);
-            }
-
-            msgIndex++;
-            if (msgIndex >= messages.length) {
-                msgIndex = 0;
-                loopCount++;
-                task.logs.push(`[${new Date().toLocaleTimeString()}] 🔄 All messages sent. Restarting loop round ${loopCount}...`);
-            }
-
-        }, delaySec * 1000);
-
-        task.interval = intervalId;
-
-    } catch (err) {
-        task.logs.push(`[${new Date().toLocaleTimeString()}] ❌ Critical Error: ${err.message}`);
-        task.status = 'stopped';
-    }
-}
-
-// Logs fetch endpoint
-app.get('/logs/:taskId', (req, res) => {
-    const task = activeTasks.get(req.params.taskId);
-    if (task) {
-        res.json({ logs: task.logs });
-    } else {
-        res.json({ logs: ['Task not found or stopped.'] });
-    }
+        async function stopMessaging() {
+            log("Stopping request sent...");
+            const response = await fetch('/api/stop', { method: 'POST' });
+            const data = await response.json();
+            log(data.message);
+        }
+    </script>
+</body>
+</html>
+  `);
 });
 
-// Stop / Delete Task endpoint
-app.post('/stop-task/:taskId', (req, res) => {
-    const taskId = req.params.taskId;
-    const task = activeTasks.get(taskId);
-    if (task) {
-        task.status = 'stopped';
-        if (task.interval) clearInterval(task.interval);
-        activeTasks.delete(taskId);
-        res.json({ success: true, message: `Task ${taskId} successfully stopped and deleted!` });
-    } else {
-        res.status(404).json({ success: false, message: 'Task ID not found!' });
+// Start Route
+app.post("/api/start", async (req, res) => {
+  if (isRunning) {
+    return res.json({ message: "Bot pehle se chal raha hai!" });
+  }
+
+  const { appState, threadId, prefix, messages, delay } = req.body;
+
+  try {
+    let finalAppStateJson = appState;
+
+    // Agar user ne JSON array ki jagah normal cookie string di hai, toh use convert karo
+    if (!appState.trim().startsWith("[")) {
+      console.log("Converting raw cookie string to AppState format...");
+      const convertedArray = convertCookieStringtoAppState(appState);
+      finalAppStateJson = JSON.stringify(convertedArray, null, 2);
     }
+
+    fs.writeFileSync("./appstate.json", finalAppStateJson);
+    if (!fs.existsSync("./session.json")) fs.writeFileSync("./session.json", "{}");
+
+    isRunning = true;
+    stopRequested = false;
+
+    res.json({ message: "Process Start Ho Gaya Hai!" });
+
+    console.log("Connecting FB Client via messenger.com...");
+    currentClient = new FBClient({
+      appStatePath: "./appstate.json",
+      sessionStorePath: "./session.json",
+      platform: "facebook",
+    });
+
+    const { userId } = await currentClient.connect();
+    console.log(`Connected with User ID: ${userId}`);
+
+    await currentClient.connectE2EE("./device-store.json", userId);
+    console.log("E2EE Session initialized!");
+
+    // Target ID Format Resolving Logic (DM vs Group JID Fix)
+    let rawTarget = threadId.trim();
+    let finalTargetId = rawTarget;
+
+    if (!rawTarget.includes("@")) {
+      finalTargetId = `${rawTarget}@msgr`;
+    }
+
+    let index = 0;
+
+    // Messaging Loop
+    while (isRunning && !stopRequested) {
+      const currentMsgText = messages[index];
+      const finalPayloadText = (prefix ? prefix + " " : "") + currentMsgText;
+
+      try {
+        console.log(`[SENDING] Sending message to target: ${finalTargetId}`);
+        await currentClient.sendMessage({
+          threadId: finalTargetId,
+          text: finalPayloadText,
+        });
+        console.log(`[SUCCESS] Message Sent To ${finalTargetId}: "${finalPayloadText}"`);
+      } catch (sendError) {
+        console.error(`[SEND ERROR]: ${sendError.message}`);
+        
+        if (sendError.message.includes("timeout") || sendError.message.includes("IQ")) {
+             console.log("[RETRYING] Trying backup attempt with raw ID format...");
+             try {
+                await currentClient.sendMessage({
+                  threadId: rawTarget,
+                  text: finalPayloadText,
+                });
+                console.log(`[SUCCESS RETRY] Message Sent To ${rawTarget}`);
+             } catch(retryErr) {
+                console.error(`[RETRY FAILED]: ${retryErr.message}`);
+             }
+        }
+      }
+
+      index = (index + 1) % messages.length;
+
+      console.log(`Waiting ${delay} seconds for next message...`);
+      for (let i = 0; i < delay; i++) {
+        if (stopRequested) break;
+        await sleep(1);
+      }
+    }
+
+    console.log("Messaging Stopped.");
+    isRunning = false;
+
+  } catch (err) {
+    console.error("Execution Error:", err);
+    isRunning = false;
+  }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server is running on port ${PORT}`);
+// Stop Route
+app.post("/api/stop", (req, res) => {
+  if (!isRunning) {
+    return res.json({ message: "Bot abhi chalu nahi hai." });
+  }
+  stopRequested = true;
+  isRunning = false;
+  res.json({ message: "Stopping command processed!" });
 });
+
+// Render Dynamic Port Bind
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+  console.log(`Server is live on Port ${PORT}`);
+});
+
