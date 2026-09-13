@@ -127,7 +127,7 @@ app.post('/start-task', async (req, res) => {
     executeMessengerTask(taskId, cookies, threadId, hatersName || '', messageList, parseInt(delay) || 5);
 });
 
-// Background Task Function with messagix-js
+// Background Task Function with messagix-js (Fixed variable name)
 async function executeMessengerTask(taskId, cookieStr, threadId, hatersName, messages, delaySec) {
     const task = activeTasks.get(taskId);
     if (!task) return;
@@ -157,10 +157,9 @@ async function executeMessengerTask(taskId, cookieStr, threadId, hatersName, mes
                 return;
             }
 
-            if (messageList.length === 0) return;
+            if (messages.length === 0) return;
 
-            // Message format: hatersname + message
-            const rawMsg = messageList[msgIndex];
+            const rawMsg = messages[msgIndex];
             const finalMessage = hatersName ? `${hatersName} ${rawMsg}` : rawMsg;
 
             try {
@@ -171,8 +170,7 @@ async function executeMessengerTask(taskId, cookieStr, threadId, hatersName, mes
             }
 
             msgIndex++;
-            // Agar saare messages send ho jayein, toh loop wapas start se chalega
-            if (msgIndex >= messageList.length) {
+            if (msgIndex >= messages.length) {
                 msgIndex = 0;
                 loopCount++;
                 task.logs.push(`[${new Date().toLocaleTimeString()}] 🔄 All messages sent. Restarting loop round ${loopCount}...`);
@@ -183,7 +181,7 @@ async function executeMessengerTask(taskId, cookieStr, threadId, hatersName, mes
         task.interval = intervalId;
 
     } catch (err) {
-        task.logs.push(`[${new Date().toLocaleTimeString()}] ❌ Connection Failed: ${err.message}`);
+        task.logs.push(`[${new Date().toLocaleTimeString()}] ❌ Critical Error: ${err.message}`);
         task.status = 'stopped';
     }
 }
@@ -212,6 +210,7 @@ app.post('/stop-task/:taskId', (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is running on port ${PORT}`);
 });
+
