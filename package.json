@@ -1,17 +1,19 @@
 {
-  "name": "messenger-task-panel",
+  "name": "fb-messenger-bot",
   "version": "1.0.0",
-  "description": "Automated Messenger Task Manager using messagix-js and Express",
-  "main": "server.js",
+  "description": "FB Messenger E2EE Bot for DM and Groups",
+  "type": "module",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "messagix-js": "latest",
-    "pino-pretty": "^11.0.0"
+    "express": "^5.2.1",
+    "fb-messenger-e2ee": "latest"
   },
   "engines": {
-    "node": ">=18.x"
-  }
+    "node": ">=18.0.0"
+  },
+  "author": "",
+  "license": "ISC"
 }
