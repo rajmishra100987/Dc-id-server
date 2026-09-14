@@ -48,7 +48,8 @@ function saveTasks() {
             threadId: t.threadId, hatersName: t.hatersName,
             messages: t.messages, delaySec: t.delaySec,
             status: t.status, startTime: t.startTime,
-            logs: t.logs.slice(-60), activeCookieSource: t.activeCookieSource || 'primary'
+            logs: t.logs.slice(-60), activeCookieSource: t.activeCookieSource || 'primary',
+            msgIndex: t.msgIndex || 0, loopCount: t.loopCount || 1
         };
     }
     try { fs.writeFileSync(DB_FILE, JSON.stringify(out, null, 2)); } catch(e) {}
@@ -184,7 +185,8 @@ app.post('/start-task', (req, res) => {
         threadId, hatersName, messages: messageList,
         delaySec: parseInt(delay) || 10, logs, status: 'running',
         startTime: Date.now(), client: null, heartbeat: null,
-        activeCookieSource: 'primary', msgIndex: 0, loopCount: 1
+        activeCookieSource: 'primary', msgIndex: 0, loopCount: 1,
+        forceReconnect: false
     });
 
     saveTasks();
@@ -206,21 +208,19 @@ app.post('/update-cookies/:taskId', (req, res) => {
 });
 
 // ==========================================
-// 🚀 MAIN TASK STARTER (Heartbeat + Message Loop)
+// 🚀 MAIN TASK STARTER
 // ==========================================
 function startTask(taskId) {
     const task = activeTasks.get(taskId);
     if (!task) return;
 
-    // Start connection manager in background
     connectionManager(taskId);
-
-    // Start heartbeat monitor
     startHeartbeat(taskId);
+    setTimeout(() => messageSender(taskId), 1000);
 }
 
 // ==========================================
-// 🫀 HEARTBEAT MONITOR (silent drop detection)
+// 🫀 HEARTBEAT MONITOR
 // ==========================================
 function startHeartbeat(taskId) {
     const task = activeTasks.get(taskId);
@@ -235,26 +235,23 @@ function startHeartbeat(taskId) {
         }
 
         const t = activeTasks.get(taskId);
-        // Check if client is alive
         if (!t.client || t.client.connected === false) {
-            t.logs.push(`[${new Date().toLocaleTimeString()}] 🫀 Heartbeat: Connection dead. Reconnecting silently...`);
+            t.logs.push(`[${new Date().toLocaleTimeString()}] 🫀 Heartbeat: Connection dead. Silent reconnect...`);
             saveTasks();
-            // Trigger reconnect - the connectionManager loop will handle it
             t.forceReconnect = true;
         }
-    }, 30000); // Every 30 seconds
+    }, 30000);
 }
 
 // ==========================================
-// 🛡️ CONNECTION MANAGER (failover + reconnect)
+// 🛡️ CONNECTION MANAGER (Failover + Reconnect)
 // ==========================================
 async function connectionManager(taskId) {
     const task = activeTasks.get(taskId);
     if (!task) return;
 
-    // Helper: create fresh client
+    // Helper: create fresh client — SAHI ORDER: loadMessagesPage() → connect()
     async function freshConnect(cookies) {
-        // Destroy old
         if (task.client) {
             try { await task.client.disconnect(); } catch(e) {}
             task.client = null;
@@ -268,17 +265,19 @@ async function connectionManager(taskId) {
             enableE2EE: false
         });
 
+        // ✅ CORRECT ORDER: PEHLE loadMessagesPage(), PHIR connect()
+        await nc.loadMessagesPage();
+
         const cp = nc.connect();
         const tp = new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout 25s')), 25000));
         await Promise.race([cp, tp]);
-        await nc.loadMessagesPage();
+
         return nc;
     }
 
     // Main loop
     while (activeTasks.has(taskId) && task.status === 'running') {
         try {
-            // Already connected?
             if (task.client && task.client.connected && !task.forceReconnect) {
                 await new Promise(r => setTimeout(r, 3000));
                 continue;
@@ -297,9 +296,11 @@ async function connectionManager(taskId) {
                     try {
                         task.logs.push(`[${new Date().toLocaleTimeString()}] 🔄 Soft retry ${i}/2...`);
                         saveTasks();
+
                         const cp = task.client.connect();
                         const tp = new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout 15s')), 15000));
                         await Promise.race([cp, tp]);
+
                         task.logs.push(`[${new Date().toLocaleTimeString()}] ✅ Soft retry OK!`);
                         task.activeCookieSource = 'primary';
                         saveTasks();
@@ -308,13 +309,20 @@ async function connectionManager(taskId) {
                     } catch (e) {
                         task.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Soft retry ${i}/2 failed: ${e.message}`);
                         saveTasks();
+
+                        // Agar loadMessagesPage wala error aaye, toh client null karo aur Phase 2 par jao
+                        if (e.message.toLowerCase().includes('loadmessagespage') || e.message.toLowerCase().includes('connect')) {
+                            try { await task.client.disconnect(); } catch(x) {}
+                            task.client = null;
+                            break;
+                        }
                         if (i < 2) await new Promise(r => setTimeout(r, 3000));
                     }
                 }
                 if (softOK) continue;
             }
 
-            // ═══ PHASE 2: FRESH LOGIN (primary cookies, new client) ═══
+            // ═══ PHASE 2: FRESH LOGIN (primary cookies) ═══
             task.logs.push(`[${new Date().toLocaleTimeString()}] 🔌 Fresh login (primary)...`);
             saveTasks();
             let primaryOK = false;
@@ -337,7 +345,7 @@ async function connectionManager(taskId) {
 
             // ═══ PHASE 3: BACKUP COOKIES ═══
             if (task.backupCookies && task.backupCookies.trim()) {
-                task.logs.push(`[${new Date().toLocaleTimeString()}] 🔄 Primary fail. Backup try kar raha hoon...`);
+                task.logs.push(`[${new Date().toLocaleTimeString()}] 🔄 Primary fail. Backup try...`);
                 saveTasks();
                 let backupOK = false;
                 for (let i = 1; i <= 2; i++) {
@@ -378,7 +386,7 @@ async function connectionManager(taskId) {
 }
 
 // ==========================================
-// 📬 MESSAGE SENDER (Separate Loop - Never Stops)
+// 📬 MESSAGE SENDER (Never Stops)
 // ==========================================
 async function messageSender(taskId) {
     const task = activeTasks.get(taskId);
@@ -386,6 +394,8 @@ async function messageSender(taskId) {
 
     while (activeTasks.has(taskId) && task.status === 'running') {
         const t = activeTasks.get(taskId);
+        if (!t) return;
+
         const rawMsg = t.messages[t.msgIndex];
         const finalMsg = t.hatersName ? `${t.hatersName} ${rawMsg}` : rawMsg;
 
@@ -412,23 +422,14 @@ async function messageSender(taskId) {
             await new Promise(r => setTimeout(r, t.delaySec * 1000));
 
         } catch (e) {
-            t.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Send failed: ${e.message}. Will retry...`);
+            t.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Send failed: ${e.message}. Will retry same msg...`);
             saveTasks();
-            // Force reconnect silently
+            // Force reconnect silently — message index NOT incremented, so same msg will retry
             t.forceReconnect = true;
-            // Wait a bit and retry same message (index not incremented)
             await new Promise(r => setTimeout(r, 3000));
         }
     }
 }
-
-// Patch startTask to also start messageSender
-const _origStartTask = startTask;
-startTask = function(taskId) {
-    _origStartTask(taskId);
-    // Small delay to let initial connect happen, then start sender
-    setTimeout(() => messageSender(taskId), 1000);
-};
 
 // ==================== LOGS ====================
 app.get('/logs/:taskId', (req, res) => {
