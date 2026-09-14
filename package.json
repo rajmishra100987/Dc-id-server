@@ -7,10 +7,10 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.21.0",
-    "messagix-js": "1.1.2",
-    "pino-pretty": "^13.0.0",
-    "ws": "^8.18.0"
+    "express": "latest",
+    "messagix-js": "latest",
+    "pino-pretty": "latest",
+    "ws": "latest"
   },
   "engines": {
     "node": ">=18.0.0"
