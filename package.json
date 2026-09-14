@@ -1,19 +1,18 @@
 {
-  "name": "messenger-bot-panel",
+  "name": "messenger-247-bot",
   "version": "1.0.0",
-  "description": "Persistent Messenger Automated Task Panel using messagix-js",
+  "description": "24/7 Persistent Messenger Bot developed by Raj Mishra",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
+    "express": "latest",
     "messagix-js": "latest",
-    "pino-pretty": "latest"
+    "pino-pretty": "latest",
+    "ws": "latest"
   },
   "engines": {
     "node": ">=18.0.0"
-  },
-  "author": "RAJ MISHRA",
-  "license": "MIT"
+  }
 }
