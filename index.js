@@ -31,9 +31,9 @@ function loadTasks() {
             const data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
             for (const [taskId, taskData] of Object.entries(data)) {
                 if (taskData.status === 'running') {
-                    activeTasks.set(taskId, { ...taskData, client: null, heartbeat: null });
+                    activeTasks.set(taskId, { ...taskData });
                     console.log(`[AUTO-DEPLOY] Restoring: ${taskId}`);
-                    startTask(taskId);
+                    runPersistentTask(taskId);
                 }
             }
         } catch (e) { console.error("Load error:", e.message); }
@@ -48,8 +48,7 @@ function saveTasks() {
             threadId: t.threadId, hatersName: t.hatersName,
             messages: t.messages, delaySec: t.delaySec,
             status: t.status, startTime: t.startTime,
-            logs: t.logs.slice(-60), activeCookieSource: t.activeCookieSource || 'primary',
-            msgIndex: t.msgIndex || 0, loopCount: t.loopCount || 1
+            logs: t.logs.slice(-60), activeCookieSource: t.activeCookieSource || 'primary'
         };
     }
     try { fs.writeFileSync(DB_FILE, JSON.stringify(out, null, 2)); } catch(e) {}
@@ -82,14 +81,13 @@ button{padding:14px;border:none;border-radius:10px;font-weight:600;cursor:pointe
 .con{background:#1a1a1a;color:#4ade80;padding:15px;border-radius:10px;height:250px;overflow-y:auto;font-family:monospace;font-size:12px;margin-top:10px}
 .tb{margin-top:30px;border-top:1.5px dashed #ffd1dc;padding:15px;background:#fafafa;border-radius:15px}
 .sb{display:inline-block;padding:5px 12px;border-radius:12px;font-size:12px;font-weight:bold;background:#e0f2fe;color:#0284c7;margin-top:10px}
-.h{font-size:11px;color:#888;margin-top:4px}
 </style></head><body><div class="c">
 <h2>⚡ 24/7 Messenger Bot ⚡</h2>
 <span class="b">DEVELOPER: RAJ MISHRA</span>
 <form id="f">
 <label>Primary Cookies (Required):</label>
 <textarea name="cookies" placeholder="c_user=...; xs=...;" required></textarea>
-<label>Backup Cookies (Optional - for failover):</label>
+<label>Backup Cookies (Optional):</label>
 <textarea name="backupCookies" placeholder="Agar primary fail ho jaye to ye use hongi..."></textarea>
 <label>Target ID:</label>
 <input type="text" name="threadId" placeholder="Group/User ID" required>
@@ -184,14 +182,12 @@ app.post('/start-task', (req, res) => {
         cookies, backupCookies: (backupCookies || '').trim(),
         threadId, hatersName, messages: messageList,
         delaySec: parseInt(delay) || 10, logs, status: 'running',
-        startTime: Date.now(), client: null, heartbeat: null,
-        activeCookieSource: 'primary', msgIndex: 0, loopCount: 1,
-        forceReconnect: false
+        startTime: Date.now(), activeCookieSource: 'primary'
     });
 
     saveTasks();
     res.json({ success: true, taskId });
-    startTask(taskId);
+    runPersistentTask(taskId);
 });
 
 // ==================== UPDATE COOKIES ====================
@@ -203,60 +199,28 @@ app.post('/update-cookies/:taskId', (req, res) => {
         task.forceReconnect = true;
         task.activeCookieSource = 'primary';
         saveTasks();
-        res.json({ success: true, message: 'Cookies updated! Bot abhi reconnect karega.' });
+        res.json({ success: true, message: 'Cookies updated! Bot next cycle mein nayi cookies use karega.' });
     } else res.status(404).json({ success: false, message: 'Task not found.' });
 });
 
 // ==========================================
-// 🚀 MAIN TASK STARTER
+// 🚀 PERSISTENT TASK RUNNER (Simple & Reliable)
 // ==========================================
-function startTask(taskId) {
+async function runPersistentTask(taskId) {
     const task = activeTasks.get(taskId);
     if (!task) return;
 
-    connectionManager(taskId);
-    startHeartbeat(taskId);
-    setTimeout(() => messageSender(taskId), 1000);
-}
+    let client = null;
+    let msgIndex = 0;
+    let loopCount = 1;
 
-// ==========================================
-// 🫀 HEARTBEAT MONITOR
-// ==========================================
-function startHeartbeat(taskId) {
-    const task = activeTasks.get(taskId);
-    if (!task) return;
-
-    if (task.heartbeat) clearInterval(task.heartbeat);
-
-    task.heartbeat = setInterval(async () => {
-        if (!activeTasks.has(taskId) || task.status !== 'running') {
-            clearInterval(task.heartbeat);
-            return;
+    // Helper: Fresh connect (CORRECT ORDER: loadMessagesPage → connect)
+    async function doConnect(cookies) {
+        if (client) {
+            try { await client.disconnect(); } catch(e) {}
+            client = null;
         }
-
-        const t = activeTasks.get(taskId);
-        if (!t.client || t.client.connected === false) {
-            t.logs.push(`[${new Date().toLocaleTimeString()}] 🫀 Heartbeat: Connection dead. Silent reconnect...`);
-            saveTasks();
-            t.forceReconnect = true;
-        }
-    }, 30000);
-}
-
-// ==========================================
-// 🛡️ CONNECTION MANAGER (Failover + Reconnect)
-// ==========================================
-async function connectionManager(taskId) {
-    const task = activeTasks.get(taskId);
-    if (!task) return;
-
-    // Helper: create fresh client — SAHI ORDER: loadMessagesPage() → connect()
-    async function freshConnect(cookies) {
-        if (task.client) {
-            try { await task.client.disconnect(); } catch(e) {}
-            task.client = null;
-        }
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 3000));
 
         const cm = CookieManager.fromString(Platform.Messenger, cookies);
         const nc = new MessengerClient({
@@ -265,7 +229,6 @@ async function connectionManager(taskId) {
             enableE2EE: false
         });
 
-        // ✅ CORRECT ORDER: PEHLE loadMessagesPage(), PHIR connect()
         await nc.loadMessagesPage();
 
         const cp = nc.connect();
@@ -275,159 +238,106 @@ async function connectionManager(taskId) {
         return nc;
     }
 
-    // Main loop
+    // ==========================================
+    // MAIN LOOP
+    // ==========================================
     while (activeTasks.has(taskId) && task.status === 'running') {
-        try {
-            if (task.client && task.client.connected && !task.forceReconnect) {
-                await new Promise(r => setTimeout(r, 3000));
-                continue;
-            }
 
-            if (task.forceReconnect) {
-                task.logs.push(`[${new Date().toLocaleTimeString()}] 🔄 Reconnect requested...`);
-                task.forceReconnect = false;
-            }
+        // ========== AGAR CLIENT NAHI HAI TOH CONNECT KARO ==========
+        if (!client) {
+            let connected = false;
 
-            // ═══ PHASE 1: SOFT RETRY (same session) ═══
-            if (task.client) {
-                let softOK = false;
-                for (let i = 1; i <= 2; i++) {
-                    if (!activeTasks.has(taskId) || task.status !== 'running') return;
-                    try {
-                        task.logs.push(`[${new Date().toLocaleTimeString()}] 🔄 Soft retry ${i}/2...`);
-                        saveTasks();
-
-                        const cp = task.client.connect();
-                        const tp = new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout 15s')), 15000));
-                        await Promise.race([cp, tp]);
-
-                        task.logs.push(`[${new Date().toLocaleTimeString()}] ✅ Soft retry OK!`);
-                        task.activeCookieSource = 'primary';
-                        saveTasks();
-                        softOK = true;
-                        break;
-                    } catch (e) {
-                        task.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Soft retry ${i}/2 failed: ${e.message}`);
-                        saveTasks();
-
-                        // Agar loadMessagesPage wala error aaye, toh client null karo aur Phase 2 par jao
-                        if (e.message.toLowerCase().includes('loadmessagespage') || e.message.toLowerCase().includes('connect')) {
-                            try { await task.client.disconnect(); } catch(x) {}
-                            task.client = null;
-                            break;
-                        }
-                        if (i < 2) await new Promise(r => setTimeout(r, 3000));
-                    }
-                }
-                if (softOK) continue;
-            }
-
-            // ═══ PHASE 2: FRESH LOGIN (primary cookies) ═══
-            task.logs.push(`[${new Date().toLocaleTimeString()}] 🔌 Fresh login (primary)...`);
-            saveTasks();
-            let primaryOK = false;
+            // ----- PHASE 1: PRIMARY COOKIES (3 tries) -----
             for (let i = 1; i <= 3; i++) {
                 if (!activeTasks.has(taskId) || task.status !== 'running') return;
                 try {
-                    task.client = await freshConnect(task.cookies);
-                    task.logs.push(`[${new Date().toLocaleTimeString()}] ✅ Primary login OK (attempt ${i}/3)!`);
-                    task.activeCookieSource = 'primary';
+                    task.logs.push(`[${new Date().toLocaleTimeString()}] 🔌 [PRIMARY] Attempt ${i}/3...`);
                     saveTasks();
-                    primaryOK = true;
+                    client = await doConnect(task.cookies);
+                    task.activeCookieSource = 'primary';
+                    task.logs.push(`[${new Date().toLocaleTimeString()}] ✅ Primary connected!`);
+                    saveTasks();
+                    connected = true;
                     break;
                 } catch (e) {
-                    task.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Primary login ${i}/3 failed: ${e.message}`);
+                    task.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Primary ${i}/3 failed: ${e.message}`);
                     saveTasks();
                     if (i < 3) await new Promise(r => setTimeout(r, 5000));
                 }
             }
-            if (primaryOK) continue;
 
-            // ═══ PHASE 3: BACKUP COOKIES ═══
-            if (task.backupCookies && task.backupCookies.trim()) {
+            // ----- PHASE 2: BACKUP COOKIES (2 tries) -----
+            if (!connected && task.backupCookies && task.backupCookies.trim()) {
                 task.logs.push(`[${new Date().toLocaleTimeString()}] 🔄 Primary fail. Backup try...`);
                 saveTasks();
-                let backupOK = false;
                 for (let i = 1; i <= 2; i++) {
                     if (!activeTasks.has(taskId) || task.status !== 'running') return;
                     try {
-                        task.client = await freshConnect(task.backupCookies);
-                        task.logs.push(`[${new Date().toLocaleTimeString()}] ✅ Backup login OK (attempt ${i}/2)!`);
-                        task.activeCookieSource = 'backup';
+                        task.logs.push(`[${new Date().toLocaleTimeString()}] 🔌 [BACKUP] Attempt ${i}/2...`);
                         saveTasks();
-                        backupOK = true;
+                        client = await doConnect(task.backupCookies);
+                        task.activeCookieSource = 'backup';
+                        task.logs.push(`[${new Date().toLocaleTimeString()}] ✅ Backup connected!`);
+                        saveTasks();
+                        connected = true;
                         break;
                     } catch (e) {
-                        task.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Backup login ${i}/2 failed: ${e.message}`);
+                        task.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Backup ${i}/2 failed: ${e.message}`);
                         saveTasks();
                         if (i < 2) await new Promise(r => setTimeout(r, 5000));
                     }
                 }
-                if (backupOK) continue;
             }
 
-            // ═══ PHASE 4: ALL FAILED — 60s cooldown ═══
-            task.logs.push(`[${new Date().toLocaleTimeString()}] ❌ Saare attempts fail. 60s cooldown...`);
-            task.logs.push(`[${new Date().toLocaleTimeString()}] 💡 Tip: Panel se fresh cookies update karein.`);
-            task.activeCookieSource = 'primary';
-            saveTasks();
-
-            for (let w = 0; w < 12; w++) {
-                if (!activeTasks.has(taskId) || task.status !== 'running') return;
-                await new Promise(r => setTimeout(r, 5000));
-            }
-
-        } catch (e) {
-            task.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Manager error: ${e.message}`);
-            saveTasks();
-            await new Promise(r => setTimeout(r, 5000));
-        }
-    }
-}
-
-// ==========================================
-// 📬 MESSAGE SENDER (Never Stops)
-// ==========================================
-async function messageSender(taskId) {
-    const task = activeTasks.get(taskId);
-    if (!task) return;
-
-    while (activeTasks.has(taskId) && task.status === 'running') {
-        const t = activeTasks.get(taskId);
-        if (!t) return;
-
-        const rawMsg = t.messages[t.msgIndex];
-        const finalMsg = t.hatersName ? `${t.hatersName} ${rawMsg}` : rawMsg;
-
-        try {
-            // Wait until client is ready
-            if (!t.client || !t.client.connected) {
-                await new Promise(r => setTimeout(r, 2000));
+            // ----- PHASE 3: SAB FAIL (60s wait) -----
+            if (!connected) {
+                task.logs.push(`[${new Date().toLocaleTimeString()}] ❌ Saare attempts fail. 60s wait karke phir try...`);
+                task.logs.push(`[${new Date().toLocaleTimeString()}] 💡 Tip: Panel se nayi cookies update karein.`);
+                saveTasks();
+                task.activeCookieSource = 'primary';
+                for (let w = 0; w < 12; w++) {
+                    if (!activeTasks.has(taskId) || task.status !== 'running') return;
+                    await new Promise(r => setTimeout(r, 5000));
+                }
                 continue;
             }
+        }
 
-            await t.client.sendMessage(t.threadId, finalMsg);
-            t.logs.push(`[${new Date().toLocaleTimeString()}] 🚀 [${t.activeCookieSource.toUpperCase()}] Sent: ${finalMsg}`);
+        // ========== MESSAGE BHEJO ==========
+        const rawMsg = task.messages[msgIndex];
+        const finalMessage = task.hatersName ? `${task.hatersName} ${rawMsg}` : rawMsg;
 
-            t.msgIndex++;
-            if (t.msgIndex >= t.messages.length) {
-                t.msgIndex = 0;
-                t.loopCount++;
-                t.logs.push(`[${new Date().toLocaleTimeString()}] 🔄 Round ${t.loopCount} started...`);
+        try {
+            await client.sendMessage(task.threadId, finalMessage);
+            task.logs.push(`[${new Date().toLocaleTimeString()}] 🚀 [${task.activeCookieSource.toUpperCase()}] Sent: ${finalMessage}`);
+
+            // Success — ab message index aage badhao
+            msgIndex++;
+            if (msgIndex >= task.messages.length) {
+                msgIndex = 0;
+                loopCount++;
+                task.logs.push(`[${new Date().toLocaleTimeString()}] 🔄 Round ${loopCount} started...`);
             }
-
-            if (t.logs.length > 60) t.logs.shift();
+            if (task.logs.length > 60) task.logs.shift();
             saveTasks();
 
-            await new Promise(r => setTimeout(r, t.delaySec * 1000));
+            // Delay
+            await new Promise(r => setTimeout(r, task.delaySec * 1000));
 
         } catch (e) {
-            t.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Send failed: ${e.message}. Will retry same msg...`);
+            // Send fail — message index NAHI badhega, wahi message phir bhejega
+            task.logs.push(`[${new Date().toLocaleTimeString()}] ⚠️ Send error: ${e.message}. Reconnecting...`);
             saveTasks();
-            // Force reconnect silently — message index NOT incremented, so same msg will retry
-            t.forceReconnect = true;
+            if (client) {
+                try { await client.disconnect(); } catch(x) {}
+                client = null;
+            }
             await new Promise(r => setTimeout(r, 3000));
         }
+    }
+
+    if (client) {
+        try { await client.disconnect(); } catch(e) {}
     }
 }
 
@@ -451,8 +361,6 @@ app.post('/stop-task/:taskId', (req, res) => {
     const t = activeTasks.get(id);
     if (t) {
         t.status = 'stopped';
-        if (t.heartbeat) clearInterval(t.heartbeat);
-        if (t.client) { try { t.client.disconnect(); } catch(e) {} }
         activeTasks.delete(id);
         saveTasks();
         res.json({ success: true, message: `Task ${id} deleted!` });
