@@ -1,19 +1,18 @@
 {
-  "name": "fb-messenger-bot",
+  "name": "messenger-bot-panel",
   "version": "1.0.0",
-  "description": "FB Messenger E2EE Bot for DM and Groups",
-  "type": "module",
+  "description": "Persistent Messenger Automated Task Panel using messagix-js",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^5.2.1",
-    "fb-messenger-e2ee": "latest"
+    "express": "^4.19.2",
+    "messagix-js": "latest"
   },
   "engines": {
     "node": ">=18.0.0"
   },
-  "author": "",
-  "license": "ISC"
+  "author": "RAJ MISHRA",
+  "license": "MIT"
 }
